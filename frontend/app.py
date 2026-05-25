@@ -197,13 +197,21 @@ def _as_blockquote(text: str) -> str:
 def format_query_response(result: dict) -> str:
     """Render a /orchestrate?action=query response as Markdown for the chat.
 
-    Renders each primary hit's full chunk content followed by its ±n
-    neighbour-expansion rows (indented as "context"). `result_count` is
-    the primary-hit count, not the total row count.
+    Returns the LLM's grounded answer only. The source chunks are still
+    retrieved server-side (so the LLM can cite page numbers) but are no
+    longer shown in the chat bubble. If the LLM is unavailable
+    (`answer` empty), we fall back to a short retrieval-only summary so
+    the user still sees something useful.
     """
     if not result.get("success"):
         return f"Query failed: {result.get('message', 'Unknown error.')}"
 
+    answer = (result.get("answer") or "").strip()
+    if answer:
+        return answer
+
+    # Fallback: LLM disabled or failed. Show a compact list of the top
+    # source pages instead of going completely silent.
     count = result.get("result_count", 0)
     rows = result.get("results_metadata", []) or []
     if count == 0 or not rows:
@@ -212,31 +220,16 @@ def format_query_response(result: dict) -> str:
     lines: list[str] = [f"Found **{count}** relevant result(s):"]
     primary_idx = 0
     for r in rows:
-        content = (r.get("content") or "").strip()
         if r.get("is_neighbour"):
-            # Neighbour rows attach to the most recent primary above.
-            lines.append("")
-            lines.append(
-                f"   ↳ *Context — Page {r['page_number']}, chunk {r['chunk_index']}*"
-            )
-            if content:
-                lines.append(_as_blockquote(content))
             continue
-
         primary_idx += 1
         score = r.get("rerank_score") if r.get("rerank_score") is not None else r.get("rrf_score")
         score_str = f"{score:.3f}" if score is not None else "N/A"
         section = (r.get("section_title") or "").strip()
         section_part = f" | Section: *{section}*" if section else ""
-        lines.append("")
-        lines.append("---")
         lines.append(
             f"**{primary_idx}.** Page {r['page_number']}{section_part} | Score: {score_str}"
         )
-        if content:
-            lines.append("")
-            lines.append(_as_blockquote(content))
-
     return "\n".join(lines)
 
 

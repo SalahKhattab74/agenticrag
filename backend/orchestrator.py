@@ -86,6 +86,10 @@ def _query(user_session: dict, payload: dict) -> dict:
         "message": f"Retrieved {data['result_count']} result(s).",
         "result_count": data["result_count"],
         "results_metadata": data["results_metadata"],
+        # LLM-generated grounded answer. Empty when the LLM is disabled
+        # (no Azure creds) or the call failed — the frontend then falls
+        # back to rendering chunks only.
+        "answer": data.get("answer", ""),
     }
 
 

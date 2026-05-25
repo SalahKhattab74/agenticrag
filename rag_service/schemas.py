@@ -64,6 +64,10 @@ class QueryResponse(BaseModel):
     success: bool
     result_count: int
     results_metadata: list[ResultMetadata]
+    # LLM-generated grounded answer. Empty string when the LLM is
+    # disabled (Azure creds unset) or the call failed — in that case the
+    # frontend falls back to rendering chunks only.
+    answer: str = ""
 
 
 # ── Admin ────────────────────────────────────────────────────────────────────

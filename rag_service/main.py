@@ -33,6 +33,8 @@ from pipeline import embeddings, figures, formulas, layout, ocr, registry, reran
 from pipeline.ingest import run_ingest_from_path
 from pipeline.retrieval import hybrid_query
 
+from llm import generate_answer, is_enabled as llm_enabled, is_greeting
+
 from schemas import (
     CreateChannelRequest,
     CreateChannelResponse,
@@ -219,15 +221,23 @@ def query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    try:
-        results = hybrid_query(
-            req.question,
-            channel_id=req.rag_channel_id,
-            top_k=req.top_k,
-        )
-    except Exception as exc:
-        logger.exception("query: retrieval failed for channel %s: %s", req.rag_channel_id, exc)
-        raise HTTPException(status_code=500, detail=f"Retrieval error: {exc}")
+    # Skip retrieval for pure greetings ("hi", "hello", "who are you") —
+    # there are no relevant documents and we just want the LLM to
+    # introduce itself. This saves an embed + DB round-trip on chitchat.
+    greeting_only = is_greeting(req.question)
+
+    if greeting_only:
+        results = []
+    else:
+        try:
+            results = hybrid_query(
+                req.question,
+                channel_id=req.rag_channel_id,
+                top_k=req.top_k,
+            )
+        except Exception as exc:
+            logger.exception("query: retrieval failed for channel %s: %s", req.rag_channel_id, exc)
+            raise HTTPException(status_code=500, detail=f"Retrieval error: {exc}")
 
     metadata = [
         ResultMetadata(
@@ -246,12 +256,29 @@ def query(req: QueryRequest):
 
     primary_count = sum(1 for m in metadata if not m.is_neighbour)
 
+    # Synthesise a grounded answer with Azure OpenAI. When the LLM is
+    # disabled (creds unset) or the call fails, `answer` comes back as
+    # "" and the frontend falls back to chunk-only rendering.
+    answer = ""
+    if llm_enabled():
+        try:
+            answer = generate_answer(
+                req.question,
+                results,
+                is_greeting_only=greeting_only,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("query: LLM generation failed: %s", exc)
+            answer = ""
+
     # Surface a small per-trace output payload — top page numbers + scores
     # — so traces are scannable in the UI without expanding every span.
     langfuse_context.update_current_observation(
         output={
             "result_count":   primary_count,
             "neighbour_rows": len(metadata) - primary_count,
+            "greeting":       greeting_only,
+            "answer_preview": (answer[:200] + " …") if len(answer) > 200 else answer,
             "top_hits": [
                 {
                     "page":         m.page_number,
@@ -268,6 +295,7 @@ def query(req: QueryRequest):
         success=True,
         result_count=primary_count,
         results_metadata=metadata,
+        answer=answer,
     )
 
 
