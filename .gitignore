@@ -1,0 +1,32 @@
+# Environment secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Docker volumes / local data
+postgres_data/
+minio_data/
+
+# HuggingFace model cache
+.cache/
+hf_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
