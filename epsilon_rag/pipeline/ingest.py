@@ -166,12 +166,21 @@ def run_ingest_from_path(
     )
 
     # ── Stage 1.5: Upload markdown to MinIO ──────────────────────────────────
-    # Markdown comes from Docling's own `export_to_markdown()` on the same
-    # parsed tree the layout stage used — no second Docling pass. Empty
-    # markdown is fine to upload (e.g. all-image PDFs); keeps the bucket
-    # layout uniform so downstream consumers can list `markdown/*.md`
-    # without "is this report missing?" branching.
-    markdown_text = extract_response.markdown or ""
+    # Prefer OCR-enriched page content over Docling's raw markdown export.
+    # Docling's export_to_markdown() writes "<!-- image -->" for image regions,
+    # losing all text Azure OCR extracted. The page content already has that
+    # text merged in, so we use it as the primary markdown source.
+    enriched_parts: list[str] = []
+    for page in extract_response.pages:
+        if (page.content or "").strip():
+            enriched_parts.append(
+                f"## Page {page.page_number}\n\n{page.content.strip()}"
+            )
+    markdown_text = (
+        "\n\n".join(enriched_parts)
+        if enriched_parts
+        else (extract_response.markdown or "")
+    )
     # Encode once and reuse the byte length in the metadata payload below.
     markdown_blob = markdown_text.encode("utf-8")
     markdown_key  = storage.object_key(

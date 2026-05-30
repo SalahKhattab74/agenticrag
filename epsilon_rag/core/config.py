@@ -82,27 +82,14 @@ class Settings(BaseSettings):
     formulas_max_tokens: int = 384        # long enough for multi-line equations
     formulas_beams: int = 1               # greedy by default; raise for accuracy at ~2× latency
 
-    # RapidOCR (PP-OCRv3) model paths. Empty = let pipeline/ocr.py fetch
-    # the canonical Arabic + multilingual-detector ONNX files from the
-    # SWHL/RapidOCR Hugging Face repo into HF_HOME on first init. Override
-    # any of these to point at a local file when running fully air-gapped
-    # or to swap in a different language's recognition model (e.g. Latin-
-    # only for English-heavy corpora — `latin_PP-OCRv3_rec_infer.onnx`).
-    ocr_det_model_path: str = ""
-    ocr_rec_model_path: str = ""
-    ocr_rec_keys_path:  str = ""
-    ocr_cls_model_path: str = ""
+    # Azure Computer Vision — used by pipeline/ocr.py for OCR fallback.
+    # Set AZURE_OCR_ENDPOINT and AZURE_OCR_KEY env vars (or override in .env).
+    azure_ocr_endpoint: str = ""
+    azure_ocr_key:      str = ""
 
-    # GPU toggle for RapidOCR's ONNX sessions. The CUDAExecutionProvider
-    # is enabled when True AND onnxruntime-gpu is installed; otherwise
-    # the engine silently falls back to CPU.
-    ocr_use_cuda: bool = True
-
-    # Drop OCR lines whose recognition confidence is below this. PP-OCRv3
-    # confidences are well-calibrated: real text scores 0.9+, hallucinated
-    # lines on non-text crops typically score 0.3-0.5. 0.5 is the sweet
-    # spot — kills the hallucinations from decorative figure regions
-    # without losing low-contrast scanned text.
+    # Drop OCR lines whose average word confidence is below this threshold.
+    # Azure word confidences: real text scores 0.9+, uncertain/noisy text
+    # scores lower. 0.5 matches the previous RapidOCR default.
     ocr_min_confidence: float = 0.5
 
     # Multilingual sentence-transformer for /v1/embed.

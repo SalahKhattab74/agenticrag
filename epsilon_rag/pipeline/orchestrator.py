@@ -130,33 +130,28 @@ def _region_area_ratio(region, page_img: np.ndarray | None) -> float:
     return region_area / page_area
 
 
-def _region_worth_ocring(region, page_img: np.ndarray | None) -> bool:
-    """Cheap pre-flight before invoking RapidOCR on a region crop.
+def _text_needs_ocr(text: str) -> bool:
+    """Return True when Docling's extracted text is missing or low quality.
 
-    Two gates, both ~microseconds:
-      1. Area: skip regions smaller than `ocr_min_region_area_ratio` of
-         the page. Tiny regions are almost always decorations, not text.
-      2. Variance: skip crops with std-dev below `ocr_min_pixel_stddev`.
-         A solid-color rectangle has near-zero variance and OCR will
-         take 2-3 s only to return "" — a clear waste.
+    Two checks, both microsecond-cost:
+      1. Length: fewer than `ocr_fallback_min_chars` characters → almost
+         certainly a scanned region with no text layer.
+      2. Quality: ratio of real Arabic/Latin alphabetic characters to total
+         is below 0.5 → text layer exists but is garbled (pre-OCR'd scan
+         with bad recognition, corrupted font encoding, etc.).
 
-    Skipping these regions on a 100-page report cuts a typical 5-10 min
-    OCR-fallback budget by ~30-50%.
+    A region passes both checks only when Docling returned meaningful text
+    from a real digital text layer — in that case Azure OCR would add cost
+    but no quality improvement.
     """
-    if page_img is None:
-        return False
-    if _region_area_ratio(region, page_img) < settings.ocr_min_region_area_ratio:
-        return False
-    x_min, y_min, x_max, y_max = (int(round(v)) for v in region.bbox)
-    page_h, page_w = page_img.shape[:2]
-    x_min = max(0, min(page_w, x_min))
-    x_max = max(0, min(page_w, x_max))
-    y_min = max(0, min(page_h, y_min))
-    y_max = max(0, min(page_h, y_max))
-    if x_max - x_min < 4 or y_max - y_min < 4:
-        return False
-    crop = page_img[y_min:y_max, x_min:x_max]
-    return float(crop.std()) >= settings.ocr_min_pixel_stddev
+    if len(text) < settings.ocr_fallback_min_chars:
+        return True
+    real = sum(
+        1 for c in text
+        if c.isalpha() or "؀" <= c <= "ۿ"
+    )
+    quality = real / len(text)
+    return quality < 0.5
 
 
 # ── Per-region dispatch ─────────────────────────────────────────────────────
@@ -188,9 +183,7 @@ def _process_region(
         # is too small to plausibly contain text, or when the crop is
         # effectively a solid color (decorative border, page margin). Each
         # skipped call saves ~50-300 ms of RapidOCR work.
-        if (options.ocr_fallback
-                and len(text) < settings.ocr_fallback_min_chars
-                and _region_worth_ocring(region, page_img)):
+        if options.ocr_fallback and _text_needs_ocr(text):
             ocr_text = ocr.ocr_crop(page_img, region.bbox)
             if ocr_text:
                 text = ocr_text
@@ -239,10 +232,7 @@ def _process_region(
         # This is independent of captioning — even when Florence-2 is off
         # we still want searchable text for legends. Same area-and-content
         # gating as the text-block fallback so we don't OCR tiny logos.
-        if _region_worth_ocring(region, page_img):
-            extracted = ocr.ocr_crop(page_img, region.bbox)
-        else:
-            extracted = ""
+        extracted = ocr.ocr_crop(page_img, region.bbox) if page_img is not None else ""
         # Florence-2 captions are English so NFKC is a no-op; OCR'd legends
         # may be Arabic glyphs and need the same fix as text blocks.
         extracted = arabic_normalize.normalize(extracted)
@@ -576,7 +566,7 @@ def _render_page_if_needed(
         if (
             r.kind in ("text", "heading", "footer")
             and options.ocr_fallback
-            and len(r.text) < settings.ocr_fallback_min_chars
+            and _text_needs_ocr(r.text)
         ):
             needs_image = True
             break
