@@ -1,132 +1,94 @@
-"""Apply pending migrations from migrations/ to the configured DB.
+"""Table helpers for the PDF extraction pipeline.
 
-Idempotent: every applied file is recorded in `schema_migrations` so
-re-running on a fully-migrated DB is a no-op. Migration files run in
-lexicographic order, which is why they're prefixed with zero-padded
-numbers.
+Docling's TableFormer stage gives the layout layer a row-major cell grid:
 
-Usage
-=====
-    python scripts/migrate.py           # apply pending, exit 0
-    python scripts/migrate.py --status  # show what's applied vs pending
-    python scripts/migrate.py --dry-run # list pending without applying
+    [["Name", "Score"], ["Omar", "98"]]
+
+The ingest orchestrator embeds table content as GitHub-flavoured Markdown so
+the table survives chunking and retrieval as readable text:
+
+    | Name | Score |
+    | --- | --- |
+    | Omar | 98 |
+
+This module deliberately has no database or model dependencies; it is called
+inside per-region processing, so failures here should be rare, predictable,
+and easy to reason about.
 """
 from __future__ import annotations
 
-import argparse
-import logging
-import sys
-from pathlib import Path
-
-# Import compatibility: this script lives in scripts/ but reuses the
-# core/db.py pool and core/config.py settings. Add the parent so the
-# `core` and `pipeline` imports resolve when run as `python scripts/migrate.py`.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from core.config import settings
-from core.db import close_pool, get_conn, init_pool
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-logger = logging.getLogger("migrate")
+from collections.abc import Iterable
 
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+def grid_to_markdown(rows: list[list[str]] | Iterable[Iterable[object]] | None) -> str:
+    """Convert a row-major table grid to GitHub-flavoured Markdown.
+
+    Args:
+        rows: Iterable of table rows. Cells may be any object; they are coerced
+            to strings. Ragged rows are padded to the widest row.
+
+    Returns:
+        A Markdown table string, or "" when there are no non-empty cells.
+
+    Notes:
+        - Markdown pipes inside cells are escaped.
+        - Newlines inside cells are collapsed to spaces.
+        - A one-row table is treated as a header-only table, which is valid GFM
+          and keeps the extracted content searchable.
+    """
+    normalised = _normalise_rows(rows)
+    if not normalised:
+        return ""
+
+    width = max(len(row) for row in normalised)
+    if width == 0:
+        return ""
+
+    padded = [row + [""] * (width - len(row)) for row in normalised]
+    if not any(cell.strip() for row in padded for cell in row):
+        return ""
+
+    header = padded[0]
+    body = padded[1:]
+
+    lines = [
+        _format_row(header),
+        _format_row(["---"] * width),
+    ]
+    lines.extend(_format_row(row) for row in body)
+    return "\n".join(lines)
 
 
-def _list_files() -> list[Path]:
-    """Return migration files sorted by filename. The numeric prefix
-    is what enforces order; we never sort by mtime."""
-    files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
-    if not files:
-        raise SystemExit(f"no .sql files found in {_MIGRATIONS_DIR}")
-    return files
+def _normalise_rows(rows: list[list[str]] | Iterable[Iterable[object]] | None) -> list[list[str]]:
+    if rows is None:
+        return []
+
+    out: list[list[str]] = []
+    for row in rows:
+        cells = [_clean_cell(cell) for cell in row] if row is not None else []
+        # Keep empty rows only if they are part of a non-empty table; they can
+        # represent deliberate spacing or missing values in extracted grids.
+        out.append(cells)
+
+    # Trim leading/trailing rows that are completely empty. Interior empty rows
+    # are retained because they may map to blank rows in the source table.
+    while out and not any(cell.strip() for cell in out[0]):
+        out.pop(0)
+    while out and not any(cell.strip() for cell in out[-1]):
+        out.pop()
+    return out
 
 
-def _applied_versions() -> set[str]:
-    """Read every row from schema_migrations. Returns an empty set if
-    the table doesn't exist yet (first run)."""
-    with get_conn() as conn:
-        cur = conn.execute(
-            """
-            SELECT EXISTS (
-                SELECT 1 FROM information_schema.tables
-                WHERE table_schema = 'public'
-                  AND table_name = 'schema_migrations'
-            )
-            """,
-        )
-        exists = cur.fetchone()[0]
-        if not exists:
-            return set()
-        cur = conn.execute("SELECT version FROM schema_migrations")
-        return {row[0] for row in cur.fetchall()}
+def _clean_cell(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    text = " ".join(text.replace("\r", "\n").split())
+    return text.replace("\\", "\\\\").replace("|", "\\|")
 
 
-def _apply(path: Path) -> None:
-    """Run one migration file in its own transaction and record the
-    version. Any exception rolls back and the version stays unrecorded
-    so the next run will retry this file."""
-    sql = path.read_text(encoding="utf-8")
-    version = path.stem
-    logger.info("applying %s …", path.name)
-    with get_conn() as conn:
-        conn.execute(sql)
-        # 000_schema_migrations creates the ledger table; record the
-        # version too. For every subsequent migration the table exists
-        # already and this INSERT is the audit trail.
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (%s) "
-            "ON CONFLICT (version) DO NOTHING",
-            [version],
-        )
-        conn.commit()
-    logger.info("applied %s", path.name)
+def _format_row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--status", action="store_true",
-                        help="Show applied vs pending and exit.")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="List pending without applying.")
-    args = parser.parse_args()
-
-    if not settings.database_url:
-        print("error: DATABASE_URL is not configured.", file=sys.stderr)
-        return 2
-
-    init_pool()
-    try:
-        files = _list_files()
-        applied = _applied_versions()
-
-        if args.status:
-            for path in files:
-                marker = "✓" if path.stem in applied else "·"
-                print(f"  {marker} {path.name}")
-            return 0
-
-        pending = [p for p in files if p.stem not in applied]
-        if not pending:
-            logger.info("schema is up to date (%d applied)", len(applied))
-            return 0
-
-        if args.dry_run:
-            print(f"  {len(pending)} pending migration(s):")
-            for path in pending:
-                print(f"    · {path.name}")
-            return 0
-
-        for path in pending:
-            _apply(path)
-        logger.info("applied %d migration(s)", len(pending))
-        return 0
-    finally:
-        close_pool()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+__all__ = ["grid_to_markdown"]

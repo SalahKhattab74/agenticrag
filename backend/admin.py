@@ -6,7 +6,6 @@ so the platform backend never talks to pgvector directly.
 """
 import json
 import logging
-import os
 from typing import Any, Optional
 
 import requests
@@ -16,8 +15,8 @@ from sqlalchemy import text
 
 from db import engine
 from jwt_auth import get_current_user
+from rag_client import call_rag_service
 
-RAG_SERVICE_URL = os.getenv("RAG_SERVICE_URL", "http://rag_service:8001")
 RAG_TIMEOUT = 30
 
 logger = logging.getLogger(__name__)
@@ -184,8 +183,9 @@ def create_and_link_rag_channel(
         raise HTTPException(status_code=400, detail="Channel name cannot be empty.")
 
     try:
-        resp = requests.post(
-            f"{RAG_SERVICE_URL}/channels",
+        resp = call_rag_service(
+            "post",
+            "/channels",
             json={
                 "name": rag_name,
                 "description": req.description,
@@ -193,7 +193,6 @@ def create_and_link_rag_channel(
             },
             timeout=RAG_TIMEOUT,
         )
-        resp.raise_for_status()
         data = resp.json()
     except requests.HTTPError as exc:
         detail = exc.response.text if exc.response is not None else str(exc)
@@ -244,11 +243,11 @@ def list_channel_reports(channelid: int, _user: dict = Depends(require_admin)):
         return ReportsResponse(success=True, reports=[])
 
     try:
-        resp = requests.get(
-            f"{RAG_SERVICE_URL}/channels/{row['rag_channel_id']}/reports",
+        resp = call_rag_service(
+            "get",
+            f"/channels/{row['rag_channel_id']}/reports",
             timeout=RAG_TIMEOUT,
         )
-        resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
         logger.exception("list_channel_reports: rag_service call failed: %s", exc)
@@ -263,14 +262,18 @@ def delete_report(report_id: str, _user: dict = Depends(require_admin)):
     """Delete a report and all of its chunks. Cascades through the RAG schema's
     foreign keys; returns the number of removed chunk rows."""
     try:
-        resp = requests.delete(
-            f"{RAG_SERVICE_URL}/reports/{report_id}",
+        resp = call_rag_service(
+            "delete",
+            f"/reports/{report_id}",
             timeout=RAG_TIMEOUT,
         )
-        if resp.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"Report {report_id} not found.")
-        resp.raise_for_status()
         data = resp.json()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Report {report_id} not found.")
+        detail = exc.response.text if exc.response is not None else str(exc)
+        logger.exception("delete_report: rag_service returned an error: %s", detail)
+        raise HTTPException(status_code=502, detail=f"RAG service error: {detail}")
     except HTTPException:
         raise
     except Exception as exc:

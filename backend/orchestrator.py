@@ -5,11 +5,8 @@ what the action means (currently "query" and "ingest"), enforces tenant
 isolation, and proxies to rag_service over HTTP.
 """
 import logging
-import os
 
-import requests
-
-RAG_SERVICE_URL = os.getenv("RAG_SERVICE_URL", "http://rag_service:8001")
+from rag_client import call_rag_service
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +53,9 @@ def _query(user_session: dict, payload: dict) -> dict:
         }
 
     try:
-        resp = requests.post(
-            f"{RAG_SERVICE_URL}/query",
+        resp = call_rag_service(
+            "post",
+            "/query",
             json={
                 "rag_channel_id": user_session["rag_channel_id"],
                 "question": question,
@@ -70,7 +68,6 @@ def _query(user_session: dict, payload: dict) -> dict:
             },
             timeout=60,
         )
-        resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
         logger.exception("orchestrator: query failed: %s", exc)
@@ -115,8 +112,9 @@ def _ingest(user_session: dict, payload: dict) -> dict:
         }
 
     try:
-        resp = requests.post(
-            f"{RAG_SERVICE_URL}/ingest",
+        resp = call_rag_service(
+            "post",
+            "/ingest",
             json={
                 "rag_channel_id": rag_channel_id,
                 "file_path": file_path,
@@ -129,7 +127,6 @@ def _ingest(user_session: dict, payload: dict) -> dict:
             },
             timeout=600,
         )
-        resp.raise_for_status()
         data = resp.json()
     except Exception as exc:
         logger.exception("orchestrator: ingest failed: %s", exc)
